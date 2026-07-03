@@ -10,7 +10,6 @@ import test from "node:test";
 const execFileAsync = promisify(execFile);
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
-const probe = resolve(root, "budget-probe");
 
 async function readToml(path) {
   const { stdout } = await execFileAsync("python3", ["-c", [
@@ -31,7 +30,7 @@ function hookCommands(parsed, event) {
 
 function budgetCommands(parsed, event, phase) {
   return hookCommands(parsed, event)
-    .filter((command) => command.includes("budget_guard.sh") && command.endsWith(` codex ${phase}`));
+    .filter((command) => command.includes("guard.mjs") && command.endsWith(` codex ${phase}`));
 }
 
 async function firstShellArg(command) {
@@ -39,51 +38,11 @@ async function firstShellArg(command) {
   return stdout.trim();
 }
 
-test("budget-probe parses Codex wham usage and picks model weekly max", async () => {
-  const fixture = resolve(root, "..", "tests", "fixtures", "codex-wham-usage.json");
-
-  const { stdout } = await execFileAsync(probe, ["--agent", "codex"], {
-    env: {
-      ...process.env,
-      BUDGET_USAGE_FIXTURE: fixture,
-      BUDGET_NOW_EPOCH: "1760000900",
-      BUDGET_STATE_DIR: await mkdtemp(resolve(tmpdir(), "budget-state-"))
-    }
-  });
-
-  const parsed = JSON.parse(stdout);
-  assert.equal(parsed.ok, true);
-  assert.equal(parsed.util, 93);
-  assert.equal(parsed.warn_util, 93);
-  assert.equal(parsed.bucket_id, "additional_rate_limits[GPT-5.3-Codex-Spark].secondary_window");
-  assert.equal(parsed.reset_epoch, 1760500100);
-  assert.equal(parsed.buckets.length, 4);
-});
-
-test("budget-probe parses Claude model buckets and ignores extra_usage for hard max", async () => {
-  const fixture = resolve(root, "..", "tests", "fixtures", "claude-usage.json");
-
-  const { stdout } = await execFileAsync(probe, ["claude"], {
-    env: {
-      ...process.env,
-      BUDGET_USAGE_FIXTURE: fixture,
-      BUDGET_NOW_EPOCH: "1780369200",
-      BUDGET_STATE_DIR: await mkdtemp(resolve(tmpdir(), "budget-state-"))
-    }
-  });
-
-  const parsed = JSON.parse(stdout);
-  assert.equal(parsed.ok, true);
-  assert.equal(parsed.util, 94);
-  assert.equal(parsed.bucket_id, "seven_day_sonnet");
-  assert.equal(parsed.extra_usage.utilization, 99);
-});
-
 test("checkBudget invokes the configured probe and preserves normalized JSON", async () => {
   const { checkBudget } = await import("../mcp-tools.mjs");
   const dir = await mkdtemp(resolve(tmpdir(), "budget-probe-"));
   const fakeProbe = resolve(dir, "budget-probe");
-  await writeFile(fakeProbe, "#!/usr/bin/env node\nconsole.log(JSON.stringify({ok:true,agent:process.argv.at(-1),util:55,warn_util:60,reset_epoch:2500,now_epoch:Number(process.env.BUDGET_NOW_EPOCH),source:'fake'}));\n", { mode: 0o755 });
+  await writeFile(fakeProbe, "#!/usr/bin/env node\nconsole.log(JSON.stringify({ok:true,agent:process.argv[2],util:55,warn_util:60,reset_epoch:2500,now_epoch:Number(process.env.BUDGET_NOW_EPOCH),source:'fake'}));\n", { mode: 0o755 });
 
   const result = await checkBudget({ agent: "claude" }, {
     env: { ...process.env, BUDGET_PROBE: fakeProbe, BUDGET_NOW_EPOCH: "1200" }
@@ -123,11 +82,16 @@ test("findBudgetProbe only accepts configured env or canonical installed bin", a
   );
 });
 
-test("codex installer keeps budget-probe canonical instead of copying into MCP dir", async () => {
+test("codex installer deploys the Node guard + probe payload, not the removed Bash scripts", async () => {
   const installer = await readFile(resolve(root, "install.sh"), "utf8");
 
-  assert.match(installer, /cp "\$HERE\/budget-probe" "\$BIN\/"/);
-  assert.doesNotMatch(installer, /cp "\$HERE\/budget-probe" "\$MCP_DIR\/"/);
+  // Node runtime is what codex now routes through (guard.mjs hook + probe.mjs).
+  assert.match(installer, /cp "\$REPO\/bin\/guard\.mjs" "\$REPO\/bin\/probe\.mjs" "\$BIN\/"/);
+  assert.match(installer, /cp "\$REPO"\/lib\/guard\/\*\.mjs "\$LIB\/guard\/"/);
+  assert.match(installer, /cp "\$REPO"\/lib\/probe\/\*\.mjs "\$LIB\/probe\/"/);
+  // the deleted Bash guard/probe/config must not be deployed anymore
+  assert.doesNotMatch(installer, /cp "\$HERE\/budget_guard\.sh"/);
+  assert.doesNotMatch(installer, /cp "\$HERE\/budget-probe"/);
 });
 
 test("codex installer writes config.toml hooks idempotently and uninstalls them", async () => {
@@ -254,7 +218,7 @@ test("codex installer recognizes single-quoted managed TOML hooks", async () => 
   const codexDir = resolve(home, ".codex");
   await mkdir(codexDir, { recursive: true });
   const configPath = resolve(codexDir, "config.toml");
-  const managedGuard = resolve(home, ".budget-guard", "bin", "budget_guard.sh");
+  const managedGuard = resolve(home, ".budget-guard", "bin", "guard.mjs");
   await writeFile(configPath, [
     "[hooks]",
     "",
@@ -316,7 +280,7 @@ test("codex installer quotes managed hook commands when HOME contains spaces", a
   await execFileAsync(resolve(root, "install.sh"), [], { cwd: root, env, timeout: 20_000 });
 
   const parsed = await readToml(configPath);
-  const guard = resolve(home, ".budget-guard", "bin", "budget_guard.sh");
+  const guard = resolve(home, ".budget-guard", "bin", "guard.mjs");
   const preCommands = budgetCommands(parsed, "PreToolUse", "pre");
   const stopCommands = budgetCommands(parsed, "Stop", "stop");
   assert.deepEqual(preCommands, [`"${guard}" codex pre`]);
@@ -583,7 +547,7 @@ test("codex installer validates MCP timeout before modifying files", async () =>
   assert.match(`${error.stdout}\n${error.stderr}`, /BUDGET_MCP_TOOL_TIMEOUT_SEC 非数字/);
   assert.equal(await readFile(legacyHooksPath, "utf8"), legacyBefore);
   assert.equal(await readFile(configPath, "utf8"), configBefore);
-  await assert.rejects(() => access(resolve(home, ".budget-guard", "bin", "budget_guard.sh")));
+  await assert.rejects(() => access(resolve(home, ".budget-guard", "bin", "guard.mjs")));
   await assert.rejects(() => access(resolve(home, ".budget-guard", "mcp", "mcp-server.mjs")));
 });
 
@@ -794,7 +758,7 @@ test("codex installer removes only managed nested TOML hooks inside shared hook 
   const codexDir = resolve(home, ".codex");
   await mkdir(codexDir, { recursive: true });
   const configPath = resolve(codexDir, "config.toml");
-  const managedGuard = resolve(home, ".budget-guard", "bin", "budget_guard.sh");
+  const managedGuard = resolve(home, ".budget-guard", "bin", "guard.mjs");
   await writeFile(configPath, [
     "[hooks]",
     "",
@@ -838,7 +802,7 @@ test("codex installer recognizes quoted TOML hook table headers", async () => {
   const codexDir = resolve(home, ".codex");
   await mkdir(codexDir, { recursive: true });
   const configPath = resolve(codexDir, "config.toml");
-  const managedGuard = resolve(home, ".budget-guard", "bin", "budget_guard.sh");
+  const managedGuard = resolve(home, ".budget-guard", "bin", "guard.mjs");
   await writeFile(configPath, [
     "[hooks]",
     "",
@@ -957,7 +921,7 @@ test("codex installer recognizes TOML table headers with trailing comments", asy
   const codexDir = resolve(home, ".codex");
   await mkdir(codexDir, { recursive: true });
   const configPath = resolve(codexDir, "config.toml");
-  const managedGuard = resolve(home, ".budget-guard", "bin", "budget_guard.sh");
+  const managedGuard = resolve(home, ".budget-guard", "bin", "guard.mjs");
   await writeFile(configPath, [
     "[hooks] # hook section",
     "",

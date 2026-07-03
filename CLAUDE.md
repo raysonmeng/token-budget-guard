@@ -12,7 +12,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 不能绕过限额(API 耗尽就是耗尽)。它只能提前停在干净点 + 帮你续接。改任何逻辑前先读 `README.md` 的「支持范围与诚实边界」和「配置项」两节。
 
-**这是一个正经的 Node 包**:git 仓库(`origin` = `raysonmeng/agent-quota-guard`,已有多次 PR 合并历史)、`package.json` v0.2.0(**已发布到 npm**,`npx agent-quota-guard …` 可直接跑)、GitHub Actions CI(`.github/workflows/ci.yml`,macOS + Linux 双矩阵)、265 个自动化测试(`node --test`)。**核心实现是 Node ESM(`lib/` + `bin/`),零运行期依赖**;`claude-budget-guard/`、`codex-budget-guard/` 下的 Bash 脚本是早期实现的遗留双包,正在被 Node 取代。运行期依赖 `jq` `curl`(macOS 还用 `security` 读 Keychain);Codex 安装期额外需要 `python3`(仅用于安全合并 TOML/JSON)。
+**这是一个正经的 Node 包**:git 仓库(`origin` = `raysonmeng/agent-quota-guard`,已有多次 PR 合并历史)、`package.json` v0.2.0(**已发布到 npm**,`npx agent-quota-guard …` 可直接跑)、GitHub Actions CI(`.github/workflows/ci.yml`,macOS + Linux 双矩阵)、245 个自动化测试(`node --test`)。**核心实现是 Node ESM(`lib/` + `bin/`),零运行期依赖**;Claude 与 Codex 的 hook、探针**都走 Node**。`claude-budget-guard/`、`codex-budget-guard/` 现在只剩安装器(`install.sh`)、共享的 `watchdog.sh`(逐字节相同的两份拷贝)、以及 Codex 专属的 MCP server —— 早期的 Bash guard/probe/config 已删除。运行期依赖 `jq` `curl`(macOS 还用 `security` 读 Keychain);Codex 安装期额外需要 `python3`(仅用于安全合并 TOML/JSON)。
 
 ## 架构关键(读多个文件才能拼出的全貌)
 
@@ -35,17 +35,19 @@ agent-quota-guard/
 │   ├── install-claude.mjs  Claude 安装器 CLI shim(→ lib/installer/claude.mjs)
 │   ├── guard.mjs           hook 运行入口(→ lib/guard/hook.mjs);**这是被写进用户 hook 的东西**
 │   └── probe.mjs           探针 CLI(→ lib/probe/index.mjs);**agent-bridge 跨仓依赖此文件**
-├── claude-budget-guard/    ← Bash 遗留双包(逐字节同步)。install.sh 已 DEPRECATED,有 node 时直接转发 Node 安装器
-├── codex-budget-guard/     ← Bash 遗留双包 + Codex 专属:install.sh、mcp-server.mjs / mcp-tools.mjs(wait_until_budget_refresh MCP 工具)
-└── tests/                  ← node --test 套件(226 case);codex-budget-guard/test/ 另有 39 case
+├── claude-budget-guard/    ← install.sh(DEPRECATED 薄转发器,exec bin/install-claude.mjs)+ watchdog.sh
+├── codex-budget-guard/     ← install.sh(bash,写 config.toml + 部署 Node payload)、watchdog.sh、
+│                             mcp-server.mjs / mcp-tools.mjs(wait_until_budget_refresh MCP 工具)
+└── tests/                  ← node --test 套件(208 case);codex-budget-guard/test/ 另有 37 case
 ```
 
-**谁是真正被调用的 hook?** —— **Claude 侧的真实 hook 是 Node 的 `bin/guard.mjs`**。`lib/installer/claude.mjs` 把
-`"<binDir>/guard.mjs" claude <phase>` 写进 `~/.claude/settings.json`(见 `HOOK_MARKER = 'guard.mjs'` 与
-`buildHookEntry`,约 `lib/installer/claude.mjs:268`)。安装器同时把 Bash 遗留文件部署到 `~/.budget-guard/bin/`,
-但 Claude 的五个生命周期事件全部指向 Node guard。**Codex 侧现阶段的 hook 仍是 Bash `budget_guard.sh`**
-(`codex-budget-guard/install.sh` 写入),不过 `lib/guard/hook.mjs` 的每个 phase 都已实现 `agent === 'codex'`
-分支——Codex 走 Node 是既定方向。
+**谁是真正被调用的 hook?** —— **Claude 与 Codex 的真实 hook 都是 Node 的 `bin/guard.mjs`**。
+`lib/installer/claude.mjs` 把 `"<binDir>/guard.mjs" claude <phase>` 写进 `~/.claude/settings.json`
+(见 `HOOK_MARKER = 'guard.mjs'` 与 `buildHookEntry`,约 `lib/installer/claude.mjs:268`);
+`codex-budget-guard/install.sh` 对称地把 `"<binDir>/guard.mjs" codex <phase>` 写进 `~/.codex/config.toml`
+的 `[[hooks.*]]`,并把 Node payload(`bin/guard.mjs`、`bin/probe.mjs`、`lib/guard`、`lib/probe`)部署到
+`~/.budget-guard/`。`lib/guard/hook.mjs` 的每个 phase 都有 `agent === 'codex'` 分支,`lib/guard/checkpoint.mjs`
+完整解析 Codex 的 apply_patch 语法——两端共用同一套 Node 逻辑,`$1`(agent)区分行为。
 
 **phase 调度模型** —— guard 挂在五个生命周期事件上,`lib/guard/hook.mjs` 的 `run()` 按 phase 分派:
 
@@ -65,20 +67,17 @@ agent-quota-guard/
 - **静默优先**:`warn_util < warnOnce` 时除长任务预估和可信 runway 收尾保护线外一个字不冒。
 - **硬线只在轮末停**(`stop` phase),`pre` 只提醒不拦工具——避免执行中途切。默认硬线 `BUDGET_HARD=99`,作为外层超限保险丝;默认 checkpoint 提醒线约 95%(`BUDGET_CHECKPOINT_LEAD`,自动压在 hard 以下),给 agent 留足写 checkpoint 的 lead。
 - **手动跳过(override)只能延后干净停止,绝不绕过限额**:仅显式短语在 `prompt` phase 触发,写限时(`BUDGET_SKIP_TTL`,默认 1800s)、按项目作用域的 marker;`pre`/`stop` 在硬线时若 marker 有效则放行/不强停,到期自动恢复。所有错误路径 fail-safe 朝「无 skip → 继续提醒并在轮末干净停」(坏 marker = 当作过期)。`BUDGET_SKIP_TTL` 是 env-only(**不**在配置文件 ALLOWLIST 内),防止仓库内 `.budget-guard.conf` 偷偷拉长跳过时长。
-- **Bash 遗留双包逐字节一致**:改 `claude-budget-guard/` 或 `codex-budget-guard/` 下的 Bash 脚本时,若改的是两包共有的 `budget_guard.sh`/`watchdog.sh`/`budget-probe`/`budget-config.sh`,**必须同步两个目录的副本**(它们是复制而非软链;`tests/override.test.mjs` 有字节相等断言把关)。`install.sh` 是唯一真正分叉的文件。
+- **`watchdog.sh` 两份拷贝逐字节一致**:`claude-budget-guard/watchdog.sh` 与 `codex-budget-guard/watchdog.sh` 是复制而非软链(两个安装器各部署本目录一份),改一处**必须同步另一处**;`tests/override.test.mjs` 有字节相等断言把关。两个 `install.sh` 各自分叉(Claude 转发 Node 安装器,Codex 写 config.toml)。
 
 **数据流 / 状态目录**(默认 `~/.budget-guard/`,`BUDGET_STATE_DIR` 可覆盖):
 - `usage_<agent>.json` —— 用量缓存(`BUDGET_CACHE_TTL` 秒,默认 45;PreToolUse 每次工具调用都跑,必须缓存)。写入用 lockfile + 原子 rename + CAS(同秒不让低 util 盖高 util)。
 - `ratelimit_<agent>.json` —— provider 429 闸(Retry-After 或默认 5min,longest-wins)。
-- `burn_<agent>.json` —— **Node 侧** burn-rate EWMA 状态(`lib/probe/index.mjs` 写,`lib/probe/burn-rate.mjs` 折算)。
-- `hist_<agent>.jsonl` —— **Bash 侧** burn-rate 历史点,仅 `budget_guard.sh` 写。
+- `burn_<agent>.json` —— burn-rate EWMA 状态(`lib/probe/index.mjs` 写,`lib/probe/burn-rate.mjs` 折算)。
 - `pending/<agent>_<scope>.json` —— **util 硬线**暂停时写的待续队列(provider 429/rate-limit 不写),`scope = sha256(realpath(cwd)+sessionId)`;watchdog/agent-bridge 逐个读它续跑;旧 `pending_<agent>.json` 扁平文件同时写一份供旧 watchdog 兼容读取。
 - `skip/<agent>_<scope>.json` —— 手动跳过硬线的限时授权 marker(`{"expires":<epoch>}`);`pre`/`stop` 读它判断是否放行,过期自动清理。
 - `notified/*.json` —— fingerprint(T1/T3 一次性提醒去重),SessionStart 时顺带清理过期项。
 
-**burn-rate 算法(Node 与 Bash 并存,不是「Bash 专属」)**:
-- **Node 侧(`lib/probe/burn-rate.mjs`,318 行,已落地)**:EWMA 双半衰期(短 2h / 长 24h),按样本对判定 non-monotonic / cross-reset / regression / ok,产出 `burn_rate_pct_per_hour` `burn_confident` `runway_seconds` `depleted_at_epoch`,作为 **probe_schema 2** 的 per-bucket 字段附加输出(纯 additive)。字段契约与 agent-bridge 共享,**改动前对齐 `burn-rate.mjs` 顶部注释**。Node hook 用这些字段做「可信 runway 收尾保护线」。
-- **Bash 侧(`budget-probe` 的 `seconds_to_hard()`,纯 awk)**:两点法,窗口内最早点/最新点算 `rate = Δutil/Δt` 外推到 hard,`rate ≤ 0` 视充足。功能较弱,是遗留实现。
+**burn-rate 算法(`lib/probe/burn-rate.mjs`,318 行,纯 Node)**:EWMA 双半衰期(短 2h / 长 24h),按样本对判定 non-monotonic / cross-reset / regression / ok,产出 `burn_rate_pct_per_hour` `burn_confident` `runway_seconds` `depleted_at_epoch`,作为 **probe_schema 2** 的 per-bucket 字段附加输出(纯 additive)。字段契约与 agent-bridge 共享,**改动前对齐 `burn-rate.mjs` 顶部注释**。Node hook 用这些字段做「可信 runway 收尾保护线」。(旧 Bash `budget-probe` 的两点法 `seconds_to_hard()` 已随 Bash 包删除。)
 
 **CC vs Codex 的真实差异**(改 Codex 分支前必读):
 - Codex 现版 PreToolUse 覆盖 Bash、apply_patch、MCP 和扩展工具;硬线放行 checkpoint 必须**精确路径匹配**,不能 basename/近似匹配(`lib/guard/checkpoint.mjs` 专门解析 codex apply_patch 的 `*** Update/Add/Delete File:` / `*** Move to:` 语法,并拦 symlink 绕过)。
@@ -90,8 +89,8 @@ agent-quota-guard/
 
 ```bash
 # 测试(发布门禁,两套都必须全绿)
-node --test tests/*.test.mjs                        # 主包 226 case(零依赖)
-cd codex-budget-guard && npm ci && npm test         # codex 子包 39 case(依赖 MCP SDK / zod)
+node --test tests/*.test.mjs                        # 主包 208 case(零依赖)
+cd codex-budget-guard && npm ci && npm test         # codex 子包 37 case(依赖 MCP SDK / zod)
 # 跑单个测试:node --test tests/guard.test.mjs   或   node --test --test-name-pattern='shouldFire' tests/guard.test.mjs
 
 # 安装 / 卸载
@@ -106,14 +105,14 @@ node bin/probe.mjs claude doctor                     # 人类可读诊断(阈值
 BUDGET_USAGE_FIXTURE=<path> node bin/probe.mjs claude probe   # 纯本地解析,不走网络
 echo '{"prompt":"/goal 重构模块"}' | node bin/guard.mjs claude prompt
 
-# 语法检查(Bash 遗留脚本;shellcheck 可选)
-bash -n codex-budget-guard/budget_guard.sh
-diff claude-budget-guard/budget_guard.sh codex-budget-guard/budget_guard.sh   # 两包应无差异
+# 语法检查 + watchdog 两份拷贝一致性(shellcheck 可选)
+bash -n codex-budget-guard/install.sh codex-budget-guard/watchdog.sh
+diff claude-budget-guard/watchdog.sh codex-budget-guard/watchdog.sh   # 应无差异
 ```
 
 ## 测试状态
 
-`node --test` 共 265 个自动化 case:`tests/*.test.mjs` 226 个(hook 五 phase、probe 取数/缓存/429、burn-rate EWMA、checkpoint 放行、override skip、resume 项目隔离、Claude 安装器幂等/卸载、Bash 兜底),`codex-budget-guard/test/budget-mcp.test.mjs` 39 个(Codex fixture parser、MCP wait loop、Codex 安装器 TOML 合并/幂等/卸载)。CI 在 macOS + Linux 双跑,任一失败即挂红,是发布门禁。
+`node --test` 共 245 个自动化 case:`tests/*.test.mjs` 208 个(hook 五 phase、probe 取数/缓存/429、burn-rate EWMA、checkpoint 放行、override skip、resume 项目隔离、Claude 安装器幂等/卸载/转发、watchdog),`codex-budget-guard/test/budget-mcp.test.mjs` 37 个(Codex 探针 normalize、MCP wait loop、Codex 安装器 TOML 合并/幂等/卸载)。CI 在 macOS + Linux 双跑,任一失败即挂红,是发布门禁。
 
 `tests/e2e/` 下另有 tmux 真机脚本(hook 触发、checkpoint 放行、stop 强停、C4 park),**非自动化**,涉及真实 usage 端点 / hook 触发 / watchdog headless 续跑的改动仍需真机带真 token 验证,不能只靠逻辑推断声称完成。
 

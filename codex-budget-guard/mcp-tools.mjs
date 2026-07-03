@@ -21,9 +21,10 @@ async function executable(path) {
 }
 
 export async function findBudgetProbe(env = process.env) {
+  // Canonical probe is the Node bin/probe.mjs (the Bash budget-probe was removed).
   const candidates = [
     env.BUDGET_PROBE,
-    resolve(env.HOME || homedir(), ".budget-guard/bin/budget-probe")
+    resolve(env.HOME || homedir(), ".budget-guard/bin/probe.mjs")
   ].filter(Boolean);
 
   for (const candidate of candidates) {
@@ -84,7 +85,8 @@ export async function checkBudget(args = {}, options = {}) {
   }
   let stdout;
   try {
-    ({ stdout } = await execFileAsync(probe, ["--agent", agent], {
+    // Node probe CLI: `probe.mjs <agent> probe`.
+    ({ stdout } = await execFileAsync(probe, [agent, "probe"], {
       env,
       timeout: options.timeout_ms || 10_000,
       maxBuffer: 1024 * 1024

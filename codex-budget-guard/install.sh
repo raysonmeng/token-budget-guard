@@ -22,7 +22,7 @@ MCP_TIMEOUT_SEC="${BUDGET_MCP_TOOL_TIMEOUT_SEC:-700000}"
 
 uninstall() {
   command -v python3 >/dev/null || { echo "需要 python3"; exit 1; }
-  [[ -f "$LEGACY_HOOKS" ]] && python3 - "$LEGACY_HOOKS" "$BIN/budget_guard.sh" "$AGENT" <<'PY'
+  [[ -f "$LEGACY_HOOKS" ]] && python3 - "$LEGACY_HOOKS" "$BIN/guard.mjs" "$AGENT" <<'PY'
 import json,re,sys,time,shutil
 p,guard,agent=sys.argv[1:4]
 try: cfg=json.load(open(p))
@@ -92,7 +92,7 @@ if new != old:
     json.dump(cfg,open(p,"w"),ensure_ascii=False,indent=2); open(p,"a").write("\n")
     print("✓ 已从 hooks.json 移除 hook")
 PY
-  [[ -f "$CONFIG" ]] && python3 - "$CONFIG" "$BIN/budget_guard.sh" "$AGENT" <<'PY'
+  [[ -f "$CONFIG" ]] && python3 - "$CONFIG" "$BIN/guard.mjs" "$AGENT" <<'PY'
 import json, os, re, shutil, sys, time
 p,guard,agent=sys.argv[1:4]
 EVENTS = ("UserPromptSubmit","PreToolUse","PostToolUse","Stop","SessionStart")
@@ -590,14 +590,20 @@ command -v node >/dev/null || echo "⚠ 未检测到 node;budget MCP server 运�
 command -v npm >/dev/null || echo "⚠ 未检测到 npm;安装 MCP SDK 依赖需要 npm。"
 
 # 1) 部署脚本
+#    watchdog 仍是 bash;hook(guard)与探针(probe)统一走 Node(与 Claude 侧一致)。
+#    Node 核心部署到 $BIN + $LIB,和 bin/install-claude.mjs 的布局对齐,
+#    这样 codex 单独安装(未装 claude)也能自带完整 Node runtime。
+REPO="$(cd "$HERE/.." && pwd)"
+LIB="$HOME/.budget-guard/lib"
 mkdir -p "$BIN"
-cp "$HERE/budget_guard.sh" "$BIN/"
 cp "$HERE/watchdog.sh" "$BIN/"
-cp "$HERE/budget-probe" "$BIN/"
-[[ -f "$HERE/budget-config.sh" ]] && cp "$HERE/budget-config.sh" "$BIN/"
-chmod +x "$BIN/budget_guard.sh" "$BIN/watchdog.sh" "$BIN/budget-probe"
-[[ -f "$BIN/budget-config.sh" ]] && chmod +x "$BIN/budget-config.sh"
-echo "✓ 脚本 → $BIN"
+chmod +x "$BIN/watchdog.sh"
+cp "$REPO/bin/guard.mjs" "$REPO/bin/probe.mjs" "$BIN/"
+chmod +x "$BIN/guard.mjs" "$BIN/probe.mjs"
+mkdir -p "$LIB/guard" "$LIB/probe"
+cp "$REPO"/lib/guard/*.mjs "$LIB/guard/"
+cp "$REPO"/lib/probe/*.mjs "$LIB/probe/"
+echo "✓ 脚本 → $BIN(guard.mjs / probe.mjs / watchdog.sh)+ lib → $LIB"
 
 # 1b) 部署 MCP server(官方 SDK,stdio)
 if [[ -f "$HERE/mcp-server.mjs" ]]; then
@@ -620,7 +626,7 @@ fi
 
 # 2) 合并 hooks + MCP server 进 Codex config.toml(幂等、备份)
 mkdir -p "$(dirname "$CONFIG")"
-python3 - "$CONFIG" "$MCP_DIR/mcp-server.mjs" "$MCP_TIMEOUT_SEC" "$BIN/budget_guard.sh" "$AGENT" <<'PY'
+python3 - "$CONFIG" "$MCP_DIR/mcp-server.mjs" "$MCP_TIMEOUT_SEC" "$BIN/guard.mjs" "$AGENT" <<'PY'
 import json, os, re, shutil, sys, time
 
 path, server, timeout, guard, agent = sys.argv[1:6]
@@ -1133,7 +1139,7 @@ PY
 
 # 2b) config.toml 写入成功后,再清理旧版 hooks.json 中的 budget-guard hook,避免升级后双注册。
 if [[ -f "$LEGACY_HOOKS" ]]; then
-  python3 - "$LEGACY_HOOKS" "$BIN/budget_guard.sh" "$AGENT" <<'PY'
+  python3 - "$LEGACY_HOOKS" "$BIN/guard.mjs" "$AGENT" <<'PY'
 import json,re,sys,time,shutil
 p,guard,agent=sys.argv[1:4]
 try: cfg=json.load(open(p))
