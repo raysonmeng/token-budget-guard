@@ -213,8 +213,8 @@ test("claude installer recognizes managed hook commands when HOME contains space
   );
 });
 
-test("claude bash fallback can uninstall managed hooks when node is unavailable", async () => {
-  const home = await mkdtemp(resolve(tmpdir(), "budget-claude-no-node-home-"));
+test("claude install.sh forwarder delegates uninstall to the Node installer (removes old bash hooks too)", async () => {
+  const home = await mkdtemp(resolve(tmpdir(), "budget-claude-forwarder-home-"));
   const claudeDir = resolve(home, ".claude");
   await mkdir(claudeDir, { recursive: true });
   const settingsPath = resolve(claudeDir, "settings.json");
@@ -224,6 +224,7 @@ test("claude bash fallback can uninstall managed hooks when node is unavailable"
         {
           hooks: [
             { type: "command", command: "echo user-keep", timeout: 9 },
+            // an OLD bash-format managed hook must still be cleaned by the Node uninstaller
             { type: "command", command: "/old/.budget-guard/bin/budget_guard.sh claude pre", timeout: 15 }
           ]
         }
@@ -231,15 +232,9 @@ test("claude bash fallback can uninstall managed hooks when node is unavailable"
     }
   }, null, 2) + "\n");
 
-  const python = (await execFileAsync("python3", ["-c", "import sys; print(sys.executable)"])).stdout.trim();
-  const fakeBin = resolve(home, "fake-bin");
-  await mkdir(fakeBin, { recursive: true });
-  await writeFile(resolve(fakeBin, "python3"), `#!/bin/sh\nexec "${python}" "$@"\n`, { mode: 0o755 });
-  await writeFile(resolve(fakeBin, "dirname"), "#!/bin/sh\nexec /usr/bin/dirname \"$@\"\n", { mode: 0o755 });
-
   await execFileAsync("/bin/bash", [resolve(root, "claude-budget-guard", "install.sh"), "--uninstall"], {
     cwd: root,
-    env: { ...process.env, HOME: home, PATH: fakeBin },
+    env: { ...process.env, HOME: home },
     timeout: 20_000
   });
 
@@ -258,10 +253,11 @@ test("claude installer deploys only runtime bin files, not the installer CLIs", 
   // runtime executables MUST be deployed
   assert.ok(deployed.includes("probe.mjs"), "probe.mjs should be deployed");
   assert.ok(deployed.includes("guard.mjs"), "guard.mjs should be deployed");
-  assert.ok(deployed.includes("budget-probe"), "bash budget-probe should be deployed for watchdog/MCP compatibility");
-  assert.ok(deployed.includes("budget_guard.sh"), "bash budget_guard.sh should be deployed for upgrade/uninstall parity");
   assert.ok(deployed.includes("watchdog.sh"), "watchdog.sh should be deployed for README cron/launchd usage");
-  assert.ok(deployed.includes("budget-config.sh"), "budget-config.sh should be deployed for bash runtime config loading");
+  // the Bash guard/probe/config were removed — they must NOT be deployed anymore
+  assert.ok(!deployed.includes("budget-probe"), "bash budget-probe should no longer be deployed");
+  assert.ok(!deployed.includes("budget_guard.sh"), "bash budget_guard.sh should no longer be deployed");
+  assert.ok(!deployed.includes("budget-config.sh"), "bash budget-config.sh should no longer be deployed");
   // installer-only CLIs MUST NOT pollute the user's runtime bin dir
   assert.ok(!deployed.includes("cli.mjs"), "cli.mjs (npx launcher) must not be deployed");
   assert.ok(

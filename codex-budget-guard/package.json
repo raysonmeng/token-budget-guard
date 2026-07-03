@@ -4,8 +4,7 @@
   "private": true,
   "type": "module",
   "bin": {
-    "codex-budget-guard-mcp": "./mcp-server.mjs",
-    "budget-probe": "./budget-probe"
+    "codex-budget-guard-mcp": "./mcp-server.mjs"
   },
   "scripts": {
     "test": "node --test test/*.test.mjs"

@@ -16,15 +16,13 @@
 
 set -uo pipefail
 AGENT="${1:-}"
-# 载入全局 + 项目配置(可选;不能 cd —— 项目配置靠 $PWD 向上查找)
-_BGC_SELF_DIR="$(dirname "$0")"
-[ -f "$_BGC_SELF_DIR/budget-config.sh" ] && . "$_BGC_SELF_DIR/budget-config.sh" && load_budget_config
+# 配置全部走环境变量 + 内置默认值(不再 source budget-config.sh)。
 STATE_DIR="${BUDGET_STATE_DIR:-$HOME/.budget-guard}"
 RESUME_BELOW="${BUDGET_RESUME_BELOW:-30}"     # 用量回落到此线下才算刷新
 ARM="${BUDGET_WATCHDOG_ARM:-0}"               # 0=dry-run,1=真执行
 CODEX_USAGE_URL="${BUDGET_CODEX_URL:-https://chatgpt.com/backend-api/wham/usage}"
 RESUME_PROMPT="${BUDGET_RESUME_PROMPT:-继续上次未完成的任务,从 .agent/checkpoint.md 的「下一步」接着做;完成后停下并在 checkpoint 标记 DONE}"
-PROBE="${BUDGET_PROBE:-$HOME/.budget-guard/bin/budget-probe}"
+PROBE="${BUDGET_PROBE:-$HOME/.budget-guard/bin/probe.mjs}"
 TMUX_TARGET="${BUDGET_TMUX_TARGET:-}"          # 设为 session:window.pane 时优先注入活 TUI
 CODEX_SANDBOX="${BUDGET_CODEX_SANDBOX:-workspace-write}"
 
@@ -67,7 +65,7 @@ resume_one() {
   [[ -d "$CWD" ]] || { echo "项目目录不存在: $CWD"; return 1; }
 
   if [[ -x "$PROBE" ]]; then
-    usage=$("$PROBE" "$AGENT" 2>/dev/null || true)
+    usage=$("$PROBE" "$AGENT" probe 2>/dev/null || true)
     util=$(printf '%s' "$usage" | jq -r '.warn_util // .util // empty' 2>/dev/null || true)
   else
     util=""
