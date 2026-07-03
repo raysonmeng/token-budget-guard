@@ -179,8 +179,8 @@ Active development. Current state:
 
 - **Core** — Node implementation (usage probe, three-tier guard, blocking-MCP continuation) plus a Bash fallback. ✅
 - **Installers** — hardened through extensive cross-review against real-world configs (idempotency, byte-perfect uninstall, no user-config corruption). ✅
-- **Distribution** — `npx agent-quota-guard …` ready; **not yet published to npm** (publish pending).
-- **Tests** — 112 (core) + 38 (Codex MCP/installer) passing.
+- **Distribution** — `npx agent-quota-guard …` ready; **published to npm** (v0.2.0).
+- **Tests** — 226 (core) + 39 (Codex MCP/installer) passing.
 - **Verified on real machines** — Claude Code full loop (hooks, checkpoint, hard-stop, resume, watchdog) via tmux E2E; Codex interactive TUI; live usage endpoints for both. Codex headless hook-firing is a documented limitation, not a bug.
 
 ---
@@ -396,8 +396,8 @@ BUDGET_HARD=99
 
 - **核心** —— Node 实现(用量探针、三档守卫、阻塞 MCP 续接)+ Bash 兜底。✅
 - **安装器** —— 经大量交叉审针对真实配置加固(幂等、字节级完美卸载、不破坏用户已有配置)。✅
-- **分发** —— `npx agent-quota-guard …` 已就绪;**尚未发布到 npm**(待发布)。
-- **测试** —— 112(核心)+ 38(Codex MCP / 安装器)全通过。
+- **分发** —— `npx agent-quota-guard …` 已就绪;**已发布到 npm**(v0.2.0)。
+- **测试** —— 226(核心)+ 39(Codex MCP / 安装器)全通过。
 - **真机已验证** —— Claude Code 全闭环(hook、checkpoint、硬停、续接、watchdog)tmux E2E;Codex 交互 TUI;两端真实 usage 端点。Codex headless 不触发 hook 是已记录的限制,非 bug。
 
 ---
